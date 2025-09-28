@@ -4,6 +4,7 @@ Centralizes all configuration to avoid duplication across modules.
 """
 import os
 from typing import Any, Optional
+import google.generativeai as genai
 
 # Client Configuration
 
@@ -21,13 +22,22 @@ DEFAULT_SAFETY_SETTINGS = [
 
 # Helper function to get base model name from any variant
 def get_base_model_name(model_name):
-    """Convert variant model name to base model name."""
-    # Remove all possible suffixes in order
+    """
+    将任何变体模型名称转换为其基础模型名称。
+    此函数会先剥离特性后缀（如 -假流式），然后迭代剥离功能后缀（如 -search, -maxthinking）。
+    """
+    # 首先，剥离特性后缀
+    base_name = get_base_model_from_feature_model(model_name)
+    # 接下来，迭代剥离功能后缀，以处理组合情况
     suffixes = ["-maxthinking", "-nothinking", "-search"]
-    for suffix in suffixes:
-        if model_name.endswith(suffix):
-            return model_name[:-len(suffix)]
-    return model_name
+    stripped = True
+    while stripped:
+        stripped = False
+        for suffix in suffixes:
+            if base_name.endswith(suffix):
+                base_name = base_name[:-len(suffix)]
+                stripped = True # 成功剥离一个后缀，再次循环以检查更多组合
+    return base_name
 
 # Helper function to check if model uses search grounding
 def is_search_model(model_name):
@@ -47,11 +57,17 @@ def is_maxthinking_model(model_name):
 # Helper function to get thinking budget for a model
 def get_thinking_budget(model_name):
     """Get the appropriate thinking budget for a model based on its name and variant."""
-    
+    base_model = get_base_model_name(model_name)
     if is_nothinking_model(model_name):
-        return 128  # Limited thinking for pro
+        if "2.5-flash" in base_model:
+            return 0  # Limited thinking for flash
+        elif "pro" in base_model:
+            return 128  # Limited thinking for pro
     elif is_maxthinking_model(model_name):
-        return 32768
+        if "flash" in base_model:
+            return 24576
+        elif "pro" in base_model:
+            return 32768
     else:
         # Default thinking budget for regular models
         return -1  # Default for all models
@@ -167,12 +183,32 @@ async def get_retry_429_interval() -> float:
 
 
 # Model name lists for different features
-BASE_MODELS = [
-    "gemini-2.5-pro-preview-06-05",
-    "gemini-2.5-pro", 
-    "gemini-2.5-pro-preview-05-06",
-    "gemini-2.5-flash",
-]
+#BASE_MODELS = [
+#    "gemini-2.5-pro-preview-06-05",
+#    "gemini-2.5-pro", 
+#    "gemini-2.5-pro-preview-05-06",
+#    "gemini-2.5-flash"
+#]
+#9.27新增
+def get_all_gemini_models():
+    """
+    获取所有可用的 Gemini 模型名称。
+    """
+    available_models = []
+    for m in genai.list_models():
+        # 过滤掉不支持生成内容的模型，或者根据您的需求进行其他过滤
+        if "generateContent" in m.supported_generation_methods:
+            model_name = m.name
+            # 检查并去除 '/models/' 前缀
+            if model_name.startswith('models/'):
+                model_name = model_name.replace('models/', '', 1) # 只替换一次
+            available_models.append(model_name)
+    return available_models
+
+# 获取模型列表
+BASE_MODELS = get_all_gemini_models()
+
+
 
 def get_available_models(router_type="openai"):
     """
@@ -184,28 +220,40 @@ def get_available_models(router_type="openai"):
     Returns:
         List of model names with feature prefixes
     """
+    # 将所有可能的后缀定义在一个列表中，方便管理
+    all_thinking_suffixes = ["-maxthinking", "-nothinking", "-search", "-search-maxthinking", "-search-nothinking"]
+
     models = []
     
     for base_model in BASE_MODELS:
+        # 1. 添加基础模型及其前缀版本 (这部分逻辑不变)
         # 基础模型
         models.append(base_model)
-        
         # 假流式模型 (前缀格式)
         models.append(f"假流式/{base_model}")
-        
         # 流式抗截断模型 (仅在流式传输时有效，前缀格式)
         models.append(f"流式抗截断/{base_model}")
-        
-        # 支持thinking模式后缀与功能前缀组合
-        for thinking_suffix in ["-maxthinking", "-nothinking", "-search"]:
+
+        # 2. 根据模型名称决定要添加的后缀列表
+        suffixes_to_add = []
+        if "2.5-flash" in base_model:
+            # 如果是 flash 模型
+            suffixes_to_add = all_thinking_suffixes
+        elif "pro" in base_model:
+            # 如果是 pro 模型
+            suffixes_to_add = all_thinking_suffixes
+        else:
+            # 其他所有模型
+            suffixes_to_add = []
+
+        # 3. 遍历上一步确定的后缀列表，并生成最终模型名称
+        for suffix in suffixes_to_add:
             # 基础模型 + thinking后缀
-            models.append(f"{base_model}{thinking_suffix}")
-            
+            models.append(f"{base_model}{suffix}")
             # 假流式 + thinking后缀
-            models.append(f"假流式/{base_model}{thinking_suffix}")
-            
+            models.append(f"假流式/{base_model}{suffix}")
             # 流式抗截断 + thinking后缀
-            models.append(f"流式抗截断/{base_model}{thinking_suffix}")
+            models.append(f"流式抗截断/{base_model}{suffix}")
     
     return models
 
